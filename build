@@ -1,56 +1,77 @@
 #!/bin/bash
-cd /tmp/rom # Depends on where source got synced
+cd /tmp/kernel/anthas
+IMAGE=$(pwd)/out/arch/arm64/boot/Image.gz-dtb
+DTBO=$(pwd)/out/arch/arm64/boot/dtbo.img
+TANGGAL=$(date +"%F_%H-%M")
+START=$(date +"%s")
+CLANG_VERSION=$(clang/bin/clang --version | head -n 1 | perl -pe 's/\(http.*?\)//gs' | sed -e 's/  */ /g' -e 's/[[:space:]]*$//')
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+export PATH=$PWD/clang/bin:$PATH
 
-# Normal build steps
-. build/envsetup.sh
-lunch arrow_phoenix-user
-export CCACHE_DIR=/tmp/ccache
-export CCACHE_EXEC=$(which ccache)
-export USE_CCACHE=1
-ccache -M 75G # It took only 6.4GB for mido
-ccache -o compression=true # Will save times and data to download and upload ccache, also negligible performance issue
-ccache -z # Clear old stats, so monitor script will provide real ccache statistics
+export ARCH=arm64
+export KBUILD_BUILD_HOST="toymachine"
+export KBUILD_BUILD_USER="thetoymaker"
 
-# Next 8 lines should be run first to collect ccache and then upload, after doning it 1 or 2 times, our ccache will help to build without these 8 lines.
-#make api-stubs-docs || echo no problem, we need ccache
-#make system-api-stubs-docs || echo no problem we need ccache
-#make test-api-stubs-docs || echo no problem, we need ccache
-#make aex -j10 & # dont remove that '&'
-#sleep 85m
-#kill %1
-#ccache -s
-#and dont use below codes for first 1 or 2 times, to get ccache uploaded,
-
-
-# upload function for uploading rom zip file! I don't want unwanted builds in my google drive haha!
-up(){
-	curl --upload-file $1 https://transfer.sh/$(basename $1); echo
-	# 14 days, 10 GB limit
+# Header
+function header() {
+    curl -s -X POST "https://api.telegram.org/bot$token/sendPhoto" \
+        -d photo=$url \
+        -d chat_id=$chat_id \
+        -d "parse_mode=html" \
+	-d caption="<b>• Anthas •</b>%0ABuild started on <code>Github Actions</code>%0A <b>For device</b> <i>Xiaomi Poco X2/Redmi K30 (phoenix)</i>%0A<b>branch:-</b> <code>$BRANCH</code>(master)%0A<b>Under commit</b> <code>$(git log --pretty=format:'"%h : %s"' -1)</code>%0A<b>Using compiler:- </b> <code>$CLANG_VERSION</code>%0A<b>Started on:- </b> <code>$(date)</code>"
 }
 
-# It's recommended to use google drive(rclone) as upload solution for coping with the time limit. Un-comment next 3 lines to upload with rclone in drive. Also change apon and junk according to your config name, uploading folder of drive
-#up(){
-#	time rclone copy $1 apon:junk -P # apon is my rclone config name, 
-#}
-
-tg(){
-	bot_api=781638789:AAGQvXyRzZztG0yY6CZHdkI6n63J4w1MSKE # Your tg bot api, dont use my one haha, it's better to encrypt bot api too.
-	your_telegram_id=$1 # No need to touch 
-	msg=$2 # No need to touch
-	curl -s "https://api.telegram.org/bot${bot_api}/sendmessage" --data "text=$msg&chat_id=${your_telegram_id}"
+# Push kernel to channel
+function push() {
+    cd AnyKernel
+    ZIP=$(echo *.zip)
+    curl -F document=@$ZIP "https://api.telegram.org/bot$token/sendDocument" \
+        -F chat_id="$chat_id" \
+        -F "disable_web_page_preview=true" \
+        -F "parse_mode=html" \
+        -F caption="Build took $(($DIFF / 60)) minute(s) and $(($DIFF % 60)) second(s). | For <b>Xiaomi Poco X2/Redmi K30 (phoenix)</b> | <b>$CLANG_VERSION</b>"
 }
 
-id=352513053 # Your telegram id
+# Fin Error
+function finerr() {
+    LOG=$(echo *.log)
+    curl -F document=@$LOG "https://api.telegram.org/bot$token/sendDocument" \
+        -F chat_id="$chat_id" \
+        -F "disable_web_page_preview=true" \
+        -F "parse_mode=html" \
+        -F caption="Build threw an error(s)"
+    exit 1
+}
 
-# Upload rom zip file if succeed to build! Send notification to tg! And send shell to tg if build fails!
+# Compiling build
+function compile() {
+   make O=out ARCH=arm64 phoenix_defconfig
+       make -j$(nproc --all) O=out \
+                      CC=clang \
+                      CROSS_COMPILE=aarch64-linux-gnu- \
+                      CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+                      NM=llvm-nm \
+                      OBJCOPY=llvm-objcopy \
+                      OBJDUMP=llvm-objdump \
+                      STRIP=llvm-strip 2>&1 | tee build.log
 
-# Let's compile by parts! Coz of ram issue!
-make api-stubs-docs || echo no problem
-make system-api-stubs-docs || echo no problem
-make test-api-stubs-docs || echo no problem
+if [[ -f ${IMAGE} &&  ${DTBO} ]]
+then
+   mv -f $IMAGE ${DTBO} AnyKernel
+else
+   finerr
+fi
+}
 
-m bacon -j10 \
-	&& send_zip=$(up out/target/product/phoenix/*zip) && tg $id "Build Succeed!
-$send_zip" \
-	|| tmate -S /tmp/tmate.sock new-session -d && tmate -S /tmp/tmate.sock wait tmate-ready && send_shell=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}') && tg $id "Build Failed" && tg $id "$send_shell" && ccache -s && sleep 2h
-ccache -s # Let's print ccache statistics finally
+# Zipping
+function zipping() {
+    cd AnyKernel || exit 1
+    zip -r9 Anthas-phoenix-${BRANCH}-${TANGGAL}.zip *
+    cd ..
+}
+header
+compile
+zipping
+END=$(date +"%s")
+DIFF=$(($END - $START))
+push
